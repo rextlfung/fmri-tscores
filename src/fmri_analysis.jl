@@ -800,6 +800,7 @@ fitting; a warning is printed when this happens.
 # Returns
 - `slice_idx` : the NamedTuple slice index actually used (pass to subsequent
                 calls via `ref_slice_idx` to keep slices aligned).
+- `t_vol`     : 3-D t-score volume `(nx, ny, nz)`.
 """
 function analyze_and_plot(X::AbstractArray{<:Number,4}, params::ExperimentParams,
     title_base::String; ref_slice_idx=nothing)
@@ -828,6 +829,11 @@ function analyze_and_plot(X::AbstractArray{<:Number,4}, params::ExperimentParams
     t_vol = reshape(t_map, nx, ny, nz)
     underlay = reshape(Y_mat, nt, nx, ny, nz)[1, :, :, :]
 
+    # ── Shared underlay intensity range: global min/max across all voxels ──
+    u_global_min = minimum(underlay)
+    u_global_max = maximum(underlay)
+    underlay_range = (u_global_min, u_global_max)
+
     # Use provided slice index or calculate peak
     if isnothing(ref_slice_idx)
         peak_idx = argmax(abs.(t_vol))
@@ -836,12 +842,16 @@ function analyze_and_plot(X::AbstractArray{<:Number,4}, params::ExperimentParams
         slice_idx = ref_slice_idx
     end
 
-    fig_vol = plot_tmap_slices(t_vol; underlay=underlay, slice_indices=slice_idx,
+    fig = plot_tmap_slices_shared(
+        t_vol;
+        underlay=underlay,
+        slice_indices=slice_idx,
         threshold=[minimum(t_vol), quantile(abs.(t_map), 0.99)],
+        underlay_range=underlay_range,
         title="t-scores for $title_base")
-    display(fig_vol)
+    display(fig)
 
-    return slice_idx
+    return slice_idx, t_vol
 end
 
 
@@ -876,15 +886,15 @@ fitting; a warning is printed when this happens.
 
 # Returns
 - `slice_idx` : the NamedTuple slice index used (for reuse across calls)
-- `t_maps`    : vector of per-scale t-map vectors (length `Nscales`)
+- `t_vols`    : vector of per-scale t-score volumes `(nx, ny, nz)`, length `Nscales`
 
 # Usage
     # Auto-detect peak slice from the summed volume:
-    caipi_5_idx, _ = analyze_and_plot_mslr(
+    caipi_5_idx, t_vols = analyze_and_plot_mslr(
         X, params, Nscales, patch_sizes, "CAIPI + MSLR recon, \$Nscales scales")
 
     # Pin slice to one already computed:
-    _, _ = analyze_and_plot_mslr(
+    _, t_vols = analyze_and_plot_mslr(
         X, params, Nscales, patch_sizes, "PD + MSLR recon, \$Nscales scales";
         ref_slice_idx=caipi_5_idx)
 """
@@ -971,5 +981,6 @@ function analyze_and_plot_mslr(
         display(fig)
     end
 
-    return ref_slice_idx, t_maps
+    t_vols = [reshape(tm, nx, ny, nz) for tm in t_maps]
+    return ref_slice_idx, t_vols
 end
