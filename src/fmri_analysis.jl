@@ -1,7 +1,7 @@
 """
 fmri_analysis.jl
 
-Task-based fMRI GLM analysis and visualisation.
+Task-based fMRI GLM analysis and visualization.
 
 Sections
 ────────
@@ -9,21 +9,24 @@ Sections
   2.  Design Matrix
   3.  GLM Fitting & Contrast t-scores
   4.  FDR / Bonferroni Correction
-  5.  Visualisation
-  6.  Experiment Parameters
-  7.  Analysis Pipelines
+  5.  Brain Mask Extraction
+  6.  Visualization
+  7.  Experiment Parameters
+  8.  Analysis Pipelines
 
 Dependencies — add via Pkg:
-  ]add CairoMakie Plots FFTW
+  ]add CairoMakie Distributions ImageMorphology Plots FFTW
 """
 
-import Random
 using Statistics
 using LinearAlgebra
 using FFTW
 using Printf
 using Plots
 using CairoMakie
+using Distributions
+using ImageMorphology
+using SpecialFunctions: gamma
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -35,7 +38,7 @@ using CairoMakie
                   undershoot_disp=1.0, ratio=0.167)
 
 Double-gamma canonical HRF (SPM-style), sampled at `tr` seconds.
-Returns a normalised vector covering 32 s.
+Returns a normalized vector covering 32 s.
 """
 function canonical_hrf(tr::Real;
     peak::Real=6.0,
@@ -45,20 +48,13 @@ function canonical_hrf(tr::Real;
     ratio::Real=0.167)
 
     t = 0:tr:32.0
-    gamma_pdf(t, a, b) = t^(a - 1) * exp(-t / b) / (b^a * _gamma(a))
+    gamma_pdf(t, a, b) = t^(a - 1) * exp(-t / b) / (b^a * gamma(a))
 
     h = [gamma_pdf(ti, peak / peak_disp, peak_disp) -
          ratio * gamma_pdf(ti, undershoot / undershoot_disp, undershoot_disp)
          for ti in t]
 
     return h ./ maximum(abs.(h))
-end
-
-# Simple recursive gamma function for the HRF (avoids SpecialFunctions.jl)
-function _gamma(n::Real)
-    n < 1 && return _gamma(n + 1) / n
-    n < 2 && return 1.0
-    return (n - 1) * _gamma(n - 1)
 end
 
 
@@ -204,90 +200,23 @@ function run_glm(
 end
 
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# 4.  FDR Correction
+# 4.  Multiple Comparisons Correction
 # ─────────────────────────────────────────────────────────────────────────────
 
 """
     t_to_p(t, df; two_tailed=true)
 
-Convert a vector of t-scores to p-values using the t-distribution CDF.
-Uses a rational approximation of the regularised incomplete beta function
-to avoid needing Distributions.jl.
+Convert a vector of t-scores to p-values using `Distributions.TDist`.
 
 - `df`         : residual degrees of freedom (n_scans - n_regressors)
 - `two_tailed` : if true (default), returns two-tailed p-values
 """
 function t_to_p(t::AbstractVector{<:Real}, df::Int; two_tailed::Bool=true)
-    # P(T > |t|) via regularised incomplete beta function
-    # I_x(a, b) with x = df/(df+t²), a = df/2, b = 0.5
-    function p_one_tail(tv)
-        x = df / (df + tv^2)
-        return 0.5 * _regularised_ibeta(x, df / 2.0, 0.5)
-    end
-    p = p_one_tail.(abs.(t))
+    dist = TDist(df)
+    p = ccdf.(dist, abs.(t))
     two_tailed && (p .*= 2)
     return clamp.(p, 0.0, 1.0)
-end
-
-# Lanczos approximation for log-gamma (accurate to ~1e-15)
-function _lgamma(z::Real)
-    g = 7
-    c = [0.99999999999980993, 676.5203681218851, -1259.1392167224028,
-        771.32342877765313, -176.61502916214059, 12.507343278686905,
-        -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7]
-    z < 0.5 && return log(π / sin(π * z)) - _lgamma(1 - z)
-    z -= 1
-    x = c[1]
-    for i in 1:g+1
-        x += c[i+1] / (z + i)
-    end
-    t = z + g + 0.5
-    return 0.5 * log(2π) + (z + 0.5) * log(t) - t + log(x)
-end
-
-
-# Accurate to ~1e-10 for the parameter ranges typical in fMRI (df > 10).
-function _regularised_ibeta(x::Real, a::Real, b::Real)
-    (x <= 0) && return 0.0
-    (x >= 1) && return 1.0
-    # Use symmetry relation when x > (a+1)/(a+b+2) for faster convergence
-    if x > (a + 1) / (a + b + 2)
-        return 1.0 - _regularised_ibeta(1 - x, b, a)
-    end
-    # Lentz continued fraction
-    lbeta_ab = _lgamma(a) + _lgamma(b) - _lgamma(a + b)
-    front = exp(log(x) * a + log(1 - x) * b - lbeta_ab) / a
-    return front * _ibeta_cf(x, a, b)
-end
-
-function _ibeta_cf(x::Real, a::Real, b::Real)
-    max_iter, tol = 200, 1e-10
-    f = 1.0
-    C = f
-    D = 0.0
-    for m in 0:max_iter
-        for n in (2m, 2m + 1)
-            d = if n == 0
-                1.0
-            elseif n % 2 == 0
-                m′ = n ÷ 2
-                m′ * (b - m′) * x / ((a + n - 1) * (a + n))
-            else
-                m′ = (n - 1) ÷ 2
-                -((a + m′) * (a + b + m′) * x) / ((a + n - 1) * (a + n))
-            end
-            D = 1.0 + d * D
-            abs(D) < 1e-30 && (D = 1e-30)
-            D = 1.0 / D
-            C = 1.0 + d / C
-            abs(C) < 1e-30 && (C = 1e-30)
-            f *= C * D
-            abs(C * D - 1.0) < tol && return f
-        end
-    end
-    return f
 end
 
 """
@@ -375,11 +304,128 @@ function fdr_correct(t_map::AbstractVector{<:Real}, df::Int;
     return t_map_fdr, mask, p, t_threshold
 end
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5.  Brain Mask Extraction
+# ─────────────────────────────────────────────────────────────────────────────
+
+"""
+    extract_brain_mask(X; intensity_threshold=0.2, closing_radius=3)
+
+Derive a binary brain mask from a 4-D BOLD array for use as a voxel filter
+prior to FDR correction. This is a morphological approximation of BET-style
+brain extraction — appropriate for excluding non-brain voxels before multiple
+comparisons correction, but not a substitute for BET for registration or
+surface analysis.
+
+The algorithm:
+  1. Compute the mean magnitude volume across time.
+  2. Threshold at `intensity_threshold × maximum(mean_vol)`.
+  3. Apply morphological closing (`closing_radius` successive dilate/erode
+     passes with the default 3×3×3 element) to fill sulcal gaps and holes.
+  4. Retain only the largest connected component under 6-connectivity.
+
+# Arguments
+- `X`                   : 4-D array (nx, ny, nz, nt); complex input is
+                           converted to magnitude automatically.
+- `intensity_threshold` : fraction of the volume maximum used as the intensity
+                           cutoff (default: 0.2). Increase if non-brain tissue
+                           survives; decrease if brain edges are eroded.
+- `closing_radius`      : number of successive dilate/erode passes used to
+                           approximate morphological closing (default: 3).
+
+# Returns
+- `mask` : `BitArray{3}` of size (nx, ny, nz); `true` inside the brain.
+
+# Example
+    mask = extract_brain_mask(Y)
+    println("Brain voxels: ", sum(mask), " / ", length(mask))
+
+    # Pass to fdr_correct:
+    brain_t = t_vol[mask]
+    brain_t_fdr, fdr_mask, p_vals, t_thr = fdr_correct(brain_t, df)
+    t_vol_fdr = zeros(Float32, size(t_vol))
+    t_vol_fdr[mask] .= brain_t_fdr
+"""
+function extract_brain_mask(X::AbstractArray{<:Number,4};
+    intensity_threshold::Real=0.1,
+    closing_radius::Int=3)
+
+    # Mean magnitude volume across time
+    Y = eltype(X) <: Complex ? Float32.(abs.(X)) : Float32.(X)
+    mean_vol = dropdims(mean(Y, dims=4), dims=4)
+
+    # Intensity threshold
+    binary = BitArray(mean_vol .> intensity_threshold * maximum(mean_vol))
+
+    # Morphological closing: closing_radius dilations then closing_radius erosions.
+    # Each pass uses ImageMorphology's default 3×3×3 structuring element, so the
+    # effective closing radius grows with the number of passes.
+    closed = binary
+    for _ in 1:closing_radius
+        closed = dilate(closed)
+    end
+    for _ in 1:closing_radius
+        closed = erode(closed)
+    end
+
+    return _largest_connected_component(BitArray(closed))
+end
+
+
+"""BFS flood-fill over a 3-D binary array (6-connectivity). Returns a mask
+containing only the largest connected component."""
+function _largest_connected_component(binary::BitArray{3})
+    sx, sy, sz = size(binary)
+    labeled = zeros(Int32, sx, sy, sz)
+    label_sizes = Int[]
+    offsets = ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
+
+    # Pre-allocate queue; use a head pointer to avoid O(n) popfirst! shifts.
+    queue = Tuple{Int,Int,Int}[]
+    sizehint!(queue, sx * sy * sz ÷ 4)
+
+    for k in 1:sz, j in 1:sy, i in 1:sx
+        (binary[i, j, k] && labeled[i, j, k] == 0) || continue
+
+        current_label = length(label_sizes) + 1
+        push!(label_sizes, 0)
+        labeled[i, j, k] = current_label
+
+        empty!(queue)
+        push!(queue, (i, j, k))
+        head = 1
+
+        while head <= length(queue)
+            x, y, z = queue[head]
+            head += 1
+            label_sizes[current_label] += 1
+
+            for (dx, dy, dz) in offsets
+                xi, yi, zi = x + dx, y + dy, z + dz
+                if 1 ≤ xi ≤ sx && 1 ≤ yi ≤ sy && 1 ≤ zi ≤ sz &&
+                   binary[xi, yi, zi] && labeled[xi, yi, zi] == 0
+                    labeled[xi, yi, zi] = current_label
+                    push!(queue, (xi, yi, zi))
+                end
+            end
+        end
+    end
+
+    isempty(label_sizes) && return falses(sx, sy, sz)
+    return BitArray(labeled .== argmax(label_sizes))
+end
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6.  Visualization
+# ─────────────────────────────────────────────────────────────────────────────
+
 """
     plot_tmap_flat(t_map; threshold=2.0, title="t-score map")
 
 Two-panel Plots.jl figure for a 1-D t-map vector:
-  - Left  : bar chart coloured by sign / threshold
+  - Left  : bar chart colored by sign / threshold
   - Right : histogram with threshold lines
 """
 function plot_tmap_flat(t_map::AbstractVector{<:Real};
@@ -433,8 +479,8 @@ end
 Orthogonal (axial / coronal / sagittal) slice view of a 3-D t-map using
 CairoMakie. Sub-threshold voxels are transparent.
 
-- `underlay`      : optional same-size anatomical volume shown in greyscale
-- `slice_indices` : NamedTuple `(x=i, y=j, z=k)`; defaults to volume centre
+- `underlay`      : optional same-size anatomical volume shown in grayscale
+- `slice_indices` : NamedTuple `(x=i, y=j, z=k)`; defaults to volume center
 
 Returns a `CairoMakie.Figure` — call `display(fig)` or `save("out.png", fig)`.
 """
@@ -569,7 +615,7 @@ function tmap_summary(t_map::AbstractArray{<:Real};
     @printf("   99th pct |t| : %.3f\n", quantile(abs.(t_map), 0.99))
     println("   ┌───────────┬────────────┬────────┬────────┬─────────┬────────┐")
     println("   │ threshold │  approx p  │  pos   │  neg   │  total  │   %    │")
-    println("   ├───────────┼────────────┼────────┼────────┼─────────┼────────┤")
+    println("   ├───────────┼────────────┬────────┬────────┼─────────┼────────┤")
     approx_p = [0.10, 0.05, 0.02, 0.01, 0.002, 0.001, 0.00001, 0.000001]
     for (thr, p) in zip(thresholds, approx_p)
         pos = count(t_map .> thr)
@@ -583,71 +629,16 @@ function tmap_summary(t_map::AbstractArray{<:Real};
 end
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 5.  Demo
-# ─────────────────────────────────────────────────────────────────────────────
-
-function demo()
-    Random.seed!(42)
-
-    tr = 2.0
-    n_scans = 200
-    n_voxels = 500
-
-    onsets_A = collect(10.0:30.0:190.0)
-    onsets_B = collect(20.0:30.0:190.0)
-    durations_A = fill(10.0, length(onsets_A))
-    durations_B = fill(10.0, length(onsets_B))
-
-    onsets = [onsets_A, onsets_B]
-    durations = [durations_A, durations_B]
-
-    X_true = build_design_matrix(onsets, durations, n_scans, tr)
-    beta_true = zeros(size(X_true, 2), n_voxels)
-    beta_true[1, 1:50] .= 2.0   # voxels   1–50  respond to condition A
-    beta_true[2, 51:100] .= 2.0   # voxels  51–100 respond to condition B
-
-    Y = X_true * beta_true + 0.5 * randn(n_scans, n_voxels)
-    contrast = [1.0, -1.0, 0.0]   # A > B
-
-    t_map, beta_hat, X = run_glm(Y, onsets, durations, contrast, n_scans, tr)
-
-    println("=== fMRI GLM demo ===")
-    println("Design matrix size           : $(size(X))")
-    println("Mean |t| all voxels          : $(round(mean(abs.(t_map)),          digits=3))")
-    println("Mean |t| voxels   1–50  (A)  : $(round(mean(abs.(t_map[1:50])),    digits=3))")
-    println("Mean |t| voxels  51–100 (B)  : $(round(mean(abs.(t_map[51:100])),  digits=3))")
-    println("Mean |t| voxels 101–500 (∅)  : $(round(mean(abs.(t_map[101:end])), digits=3))")
-
-    tmap_summary(t_map)
-
-    # Flat t-map: bar chart + histogram (Plots.jl)
-    display(plot_tmap_flat(t_map; title="Contrast: A > B"))
-
-    # Design matrix heatmap
-    display(plot_design_matrix(X; condition_names=["Condition A", "Condition B"]))
-
-    # Orthogonal slice view (CairoMakie) — reshape flat map into toy volume
-    t_vol = reshape([t_map; zeros(500)], 10, 10, 10)
-    display(plot_tmap_slices(t_vol; title="demo 3-D t-map"))
-
-    return t_map, beta_hat, X
-end
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 5b. Shared-scale slice viewer
-# ─────────────────────────────────────────────────────────────────────────────
-
 """
     plot_tmap_slices_shared(t_vol; threshold, clim, underlay, underlay_range,
                              slice_indices, title)
 
 Identical to `plot_tmap_slices` but accepts an explicit `underlay_range`
-`(u_min, u_max)` so that the anatomical background is normalised on a
+`(u_min, u_max)` so that the anatomical background is normalized on a
 **shared scale** across multiple calls.
 
 All keyword arguments have sensible defaults and the function is usable
-standalone as well as from `analyze_mslr_scales`.
+standalone as well as from `analyze_and_plot_mslr`.
 """
 function plot_tmap_slices_shared(
     t_vol::AbstractArray{<:Real,3};
@@ -740,7 +731,7 @@ end
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6.  Experiment Parameters
+# 7.  Experiment Parameters
 # ─────────────────────────────────────────────────────────────────────────────
 
 """
@@ -773,7 +764,7 @@ end
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 7.  Analysis Pipelines
+# 8.  Analysis Pipelines
 # ─────────────────────────────────────────────────────────────────────────────
 
 """
@@ -801,6 +792,7 @@ fitting; a warning is printed when this happens.
 """
 function analyze_and_plot(X::AbstractArray{<:Number,4}, params::ExperimentParams,
     title_base::String; ref_slice_idx=nothing)
+
     # Discard instructional frames
     Y = X[:, :, :, (params.n_discard+1):end]
     (nx, ny, nz, nt) = size(Y)
@@ -812,26 +804,41 @@ function analyze_and_plot(X::AbstractArray{<:Number,4}, params::ExperimentParams
         Y = abs.(Y)
     end
 
-    Y_mat = Matrix{Float32}(transpose(reshape(Float32.(Y), :, nt)))
+    # ── Brain mask ──────────────────────────────────────────────────────────
+    brain_mask = extract_brain_mask(Y)
+    brain_mask_flat = vec(brain_mask)
 
-    t_map, beta_hat, design_matrix = run_glm(Y_mat, params.onsets, params.durations,
+    # GLM on brain voxels only
+    Y_mat = Matrix{Float32}(transpose(reshape(Float32.(Y), :, nt)))
+    Y_mat_brain = Y_mat[:, brain_mask_flat]
+
+    t_map_brain, _, design_matrix = run_glm(Y_mat_brain, params.onsets, params.durations,
         params.contrast, nt, params.tr)
 
-    # Visualise
-    tmap_summary(t_map; title="t-map summary for $title_base")
+    # Reconstruct full t_map with zeros outside the brain
+    t_map = zeros(Float32, nx * ny * nz)
+    t_map[brain_mask_flat] .= t_map_brain
+
+    # ── FDR display threshold ───────────────────────────────────────────────
+    df = nt - size(design_matrix, 2)
+    _, _, _, t_thr = fdr_correct(t_map_brain, df)
+    display_threshold = isnan(t_thr) ? quantile(abs.(t_map_brain), 0.99) : t_thr
+
+    # Visualize
+    tmap_summary(t_map_brain; title="t-map summary for $title_base")
 
     fig_flat = plot_tmap_flat(t_map; title="t-scores for $title_base")
-    # display(fig_flat)
+    display(fig_flat)
 
     t_vol = reshape(t_map, nx, ny, nz)
-    underlay = reshape(Y_mat, nt, nx, ny, nz)[1, :, :, :]
+    underlay = dropdims(mean(Y, dims=4), dims=4)
 
-    # ── Shared underlay intensity range: global min/max across all voxels ──
+    # ── Shared underlay intensity range: global min/max across brain ────────
     u_global_min = minimum(underlay)
     u_global_max = maximum(underlay)
     underlay_range = (u_global_min, u_global_max)
 
-    # Use provided slice index or calculate peak
+    # Use provided slice index or calculate peak within brain
     if isnothing(ref_slice_idx)
         peak_idx = argmax(abs.(t_vol))
         slice_idx = (x=peak_idx[1], y=peak_idx[2], z=peak_idx[3])
@@ -843,9 +850,9 @@ function analyze_and_plot(X::AbstractArray{<:Number,4}, params::ExperimentParams
         t_vol;
         underlay=underlay,
         slice_indices=slice_idx,
-        threshold=[minimum(t_vol), quantile(abs.(t_map), 0.99)],
+        threshold=[-display_threshold, display_threshold],
         underlay_range=underlay_range,
-        title="t-scores for $title_base")
+        title="t-scores for $title_base (FDR q<0.05)")
     display(fig)
 
     return slice_idx, t_vol
@@ -855,14 +862,20 @@ end
 """
     analyze_and_plot_mslr(X, params, Nscales, patch_sizes, title_base;
                           ref_slice_idx=nothing,
+                          q=0.05,
                           threshold_quantile=0.99,
                           plot_summary=false)
 
 Run GLM on each signal component of a multi-scale low-rank (MSLR)
-reconstruction and plot all scales on a **shared colour scale**.
+reconstruction and plot all scales with a **shared color scale and underlay**,
+but with **per-scale FDR thresholds** so that each scale's activation map is
+thresholded independently.
 
-Both the t-score overlay and the anatomical underlay are normalised
-globally across all scales, so components are directly comparable.
+Both the t-score color scale and the anatomical underlay are normalized
+globally across all scales, so components are directly comparable. The display
+threshold is determined per scale by Benjamini-Hochberg FDR at level `q`,
+falling back to `threshold_quantile` of that scale's brain |t| values if no
+voxels survive FDR correction.
 
 Complex-valued input is automatically converted to magnitude (`abs.()`) before
 fitting; a warning is printed when this happens.
@@ -877,9 +890,12 @@ fitting; a warning is printed when this happens.
 - `ref_slice_idx`      : NamedTuple `(x=i, y=j, z=k)` to fix the display
                          slice. When `nothing` (default) the peak |t| in the
                          **summed** reconstruction is used.
-- `threshold_quantile` : quantile of pooled |t| used as the lower display
-                         threshold. Default `0.99` (top 1 % shown).
-- `plot_summary`       : if `true`, call `tmap_summary` for each scale.
+- `q`                  : FDR level for per-scale thresholding (default `0.05`).
+- `threshold_quantile` : fallback quantile of brain |t| used as the display
+                         threshold when FDR finds no surviving voxels for a
+                         given scale. Default `0.99` (top 1 % shown).
+- `plot_summary`       : if `true`, call `tmap_summary` for each scale
+                         (brain voxels only).
 
 # Returns
 - `slice_idx` : the NamedTuple slice index used (for reuse across calls)
@@ -902,6 +918,7 @@ function analyze_and_plot_mslr(
     patch_sizes,
     title_base::String;
     ref_slice_idx=nothing,
+    q::Real=0.05,
     threshold_quantile::Real=0.99,
     plot_summary::Bool=false)
 
@@ -915,29 +932,38 @@ function analyze_and_plot_mslr(
     (nx, ny, nz, nt_raw, _) = size(X)
     nt = nt_raw - params.n_discard
 
+    # ── Brain mask: derived from the temporal mean of the summed reconstruction
+    Y_for_mask = dropdims(sum(X[:, :, :, (params.n_discard+1):end, :], dims=5), dims=5)
+    brain_mask = extract_brain_mask(Y_for_mask)
+    brain_mask_flat = vec(brain_mask)
+    df = nt - length(params.contrast)
+
     # ── Pass 1: compute all t-maps and collect global statistics ───────────
     t_maps = Vector{Vector{Float32}}(undef, Nscales)
     underlays = Vector{Array{Float32,3}}(undef, Nscales)
+    fdr_thresholds = fill(NaN, Nscales)
 
     for scale in 1:Nscales
         GC.gc()
         Y_scale = X[:, :, :, (params.n_discard+1):end, scale]
         Y_mat = Matrix{Float32}(transpose(reshape(Float32.(Y_scale), :, nt)))
+        Y_mat_brain = Y_mat[:, brain_mask_flat]
 
-        t_map, _, _ = run_glm(Y_mat, params.onsets, params.durations,
+        t_map_brain, _, _ = run_glm(Y_mat_brain, params.onsets, params.durations,
             params.contrast, nt, params.tr)
+
+        # Reconstruct full t_map with zeros outside the brain
+        t_map = zeros(Float32, nx * ny * nz)
+        t_map[brain_mask_flat] .= t_map_brain
         t_maps[scale] = t_map
-        underlays[scale] = reshape(Y_mat, nt, nx, ny, nz)[1, :, :, :]
+
+        underlays[scale] = dropdims(mean(Float32.(Y_scale), dims=4), dims=4)
+        _, _, _, fdr_thresholds[scale] = fdr_correct(t_map_brain, df; q=q)
     end
 
-    # ── Shared t-score colour scale: symmetric around global max |t| ───────
+    # ── Shared t-score color scale: symmetric around global max |t| ───────
     global_max_t = maximum(maximum(abs.(tm)) for tm in t_maps)
     shared_clim = (-global_max_t, global_max_t)
-
-    # Shared threshold: top (1 - threshold_quantile) of |t| pooled globally
-    all_t_abs = vcat([abs.(tm) for tm in t_maps]...)
-    shared_thr_hi = quantile(all_t_abs, threshold_quantile)
-    shared_threshold = [minimum(minimum(t_maps)), shared_thr_hi]
 
     # ── Shared underlay intensity range: global min/max across all scales ──
     u_global_min = minimum(minimum(u) for u in underlays)
@@ -947,22 +973,38 @@ function analyze_and_plot_mslr(
     # ── Determine slice index from summed reconstruction if not provided ───
     if isnothing(ref_slice_idx)
         Y_sum = dropdims(sum(X[:, :, :, (params.n_discard+1):end, :], dims=5), dims=5)
-        Y_sum_mat = Matrix(transpose(reshape(Y_sum, :, nt)))
-        t_sum, _, _ = run_glm(Y_sum_mat, params.onsets, params.durations,
+        Y_sum_mat = Matrix{Float32}(transpose(reshape(Float32.(Y_sum), :, nt)))
+        Y_sum_mat_brain = Y_sum_mat[:, brain_mask_flat]
+
+        t_sum_brain, _, _ = run_glm(Y_sum_mat_brain, params.onsets, params.durations,
             params.contrast, nt, params.tr)
+        t_sum = zeros(Float32, nx * ny * nz)
+        t_sum[brain_mask_flat] .= t_sum_brain
+
         t_sum_vol = reshape(t_sum, nx, ny, nz)
         peak_idx = argmax(abs.(t_sum_vol))
         ref_slice_idx = (x=peak_idx[1], y=peak_idx[2], z=peak_idx[3])
     end
 
-    # ── Pass 2: plot every scale with shared scales ────────────────────────
+    # ── Pass 2: plot every scale with per-scale FDR threshold ─────────────
     for scale in 1:Nscales
         GC.gc()
-        scale_title = "$title_base, scale = $(patch_sizes[scale])"
+        scale_title = "$title_base, scale = $(patch_sizes[scale]) (FDR q<$q)"
         t_map = t_maps[scale]
         underlay = underlays[scale]
 
-        plot_summary && tmap_summary(t_map; title=scale_title)
+        plot_summary && tmap_summary(t_map[brain_mask_flat]; title=scale_title)
+
+        # Per-scale display threshold: FDR result or fallback quantile
+        scale_thr = fdr_thresholds[scale]
+        display_threshold = if isnan(scale_thr)
+            quantile(abs.(t_map[brain_mask_flat]), threshold_quantile)
+        else
+            scale_thr
+        end
+
+        fig_flat = plot_tmap_flat(t_map[brain_mask_flat]; title="t-scores for $title_base")
+        display(fig_flat)
 
         t_vol = reshape(t_map, nx, ny, nz)
 
@@ -970,7 +1012,7 @@ function analyze_and_plot_mslr(
             t_vol;
             underlay=underlay,
             slice_indices=ref_slice_idx,
-            threshold=shared_threshold,
+            threshold=[-display_threshold, display_threshold],
             clim=shared_clim,
             underlay_range=shared_underlay_range,
             title=scale_title)

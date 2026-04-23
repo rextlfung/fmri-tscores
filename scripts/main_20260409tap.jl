@@ -26,19 +26,19 @@ mkpath(out_dir)
 # ==============================================================================
 
 # %% Load file: CAIPI + CG-SENSE
-fn = "/mnt/storage/rexfung/20260409tap/recon/caipi_recon_cgs.nii"
+fn = "/mnt/storage/rexfung/20260409tap/recon/caipi_recon_cgs_l1_r0.01.nii"
 X = niread(fn)
 cg_idx, caipi_cgs_tmap = analyze_and_plot(X, params, "CAIPI sampling + CG-SENSE recon")
 export_niftis(X, caipi_cgs_tmap, params, "caipi_cgs", out_dir)
 
 # %% Load file: time-shifted CAIPI + CG-SENSE
-fn = "/mnt/storage/rexfung/20260409tap/recon/caipi_ts_recon_cgs.nii"
+fn = "/mnt/storage/rexfung/20260409tap/recon/caipi_ts_recon_cgs_l1_r0.01.nii"
 X = niread(fn)
 _, caipi_ts_cgs_tmap = analyze_and_plot(X, params, "time-shifted CAIPI sampling + CG-SENSE recon"; ref_slice_idx=cg_idx)
 export_niftis(X, caipi_ts_cgs_tmap, params, "caipi_ts_cgs", out_dir)
 
 # %% Load file: PD + CG-SENSE
-fn = "/mnt/storage/rexfung/20260409tap/recon/pd_recon_cgs.nii"
+fn = "/mnt/storage/rexfung/20260409tap/recon/pd_recon_cgs_l1_r0.01.nii"
 X = niread(fn)
 _, pd_cgs_tmap = analyze_and_plot(X, params, "PD sampling + CG-SENSE recon"; ref_slice_idx=cg_idx)
 export_niftis(X, pd_cgs_tmap, params, "pd_cgs", out_dir)
@@ -95,10 +95,8 @@ X = vars["X"]
 Nscales = Int(vars["Nscales"])
 patch_sizes = vars["patch_sizes"]
 
-caipi_1_idx, _ = analyze_and_plot(dropdims(sum(X, dims=5), dims=5), params,
-    "CAIPI sampling + MSLR recon, $Nscales scales (sum)")
 _, caipi_1_tmaps = analyze_and_plot_mslr(X, params, Nscales, patch_sizes,
-    "CAIPI sampling + MSLR recon, $Nscales scales"; ref_slice_idx=caipi_1_idx)
+    "CAIPI sampling + MSLR recon, $Nscales scales")
 export_niftis(X, caipi_1_tmaps, patch_sizes, Nscales, params, "caipi", out_dir)
 
 # %% Load file: time-shifted CAIPI 1 scale LLR
@@ -108,10 +106,8 @@ X = vars["X"]
 Nscales = Int(vars["Nscales"])
 patch_sizes = vars["patch_sizes"]
 
-caipi_ts_1_idx, _ = analyze_and_plot(dropdims(sum(X, dims=5), dims=5), params,
-    "time-shifted CAIPI sampling + MSLR recon, $Nscales scales (sum)")
 _, caipi_ts_1_tmaps = analyze_and_plot_mslr(X, params, Nscales, patch_sizes,
-    "time-shifted CAIPI sampling + MSLR recon, $Nscales scales"; ref_slice_idx=caipi_ts_1_idx)
+    "time-shifted CAIPI sampling + MSLR recon, $Nscales scales")
 export_niftis(X, caipi_ts_1_tmaps, patch_sizes, Nscales, params, "caipi_ts", out_dir)
 
 # %% Load file: PD 1 scale LLR
@@ -121,8 +117,6 @@ X = vars["X"]
 Nscales = Int(vars["Nscales"])
 patch_sizes = vars["patch_sizes"]
 
-pd_1_idx, _ = analyze_and_plot(dropdims(sum(X, dims=5), dims=5), params,
-    "PD sampling + MSLR recon, $Nscales scales (sum)")
 _, pd_1_tmaps = analyze_and_plot_mslr(X, params, Nscales, patch_sizes,
-    "PD sampling + MSLR recon, $Nscales scales"; ref_slice_idx=pd_1_idx)
+    "PD sampling + MSLR recon, $Nscales scales")
 export_niftis(X, pd_1_tmaps, patch_sizes, Nscales, params, "pd", out_dir)
