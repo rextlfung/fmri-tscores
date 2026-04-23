@@ -291,56 +291,6 @@ function _ibeta_cf(x::Real, a::Real, b::Real)
 end
 
 """
-    fdr_correct(t_map, df; q=0.05, two_tailed=true)
-
-Benjamini-Hochberg FDR correction for a voxel-wise t-map.
-
-# Arguments
-- `t_map`      : vector of t-scores (one per voxel)
-- `df`         : residual degrees of freedom (n_scans - n_regressors)
-- `q`          : desired FDR level (default 0.05)
-- `two_tailed` : whether to use two-tailed p-values (default true)
-
-# Returns
-- `t_map_fdr`  : t-map with sub-threshold voxels zeroed out
-- `mask`       : BitVector — true for voxels surviving FDR correction
-- `p_vals`     : raw p-value for each voxel
-- `t_threshold`: the t-score cutoff corresponding to the FDR threshold
-                 (NaN if no voxels survive)
-
-# Example
-    t_map_fdr, mask, p_vals, t_thr = fdr_correct(t_map, n_scans - size(X, 2))
-    println("Voxels surviving FDR q<0.05: ", sum(mask))
-"""
-function fdr_correct(t_map::AbstractVector{<:Real}, df::Int;
-    q::Real=0.05, two_tailed::Bool=true)
-
-    n = length(t_map)
-    p = t_to_p(t_map, df; two_tailed)
-
-    # Benjamini-Hochberg: sort p-values, find largest k where p_(k) ≤ k/n · q
-    order = sortperm(p)
-    sorted_p = p[order]
-    bh_line = (1:n) .* (q / n)
-    surviving = sorted_p .<= bh_line
-
-    mask = falses(n)
-    if any(surviving)
-        k_max = findlast(surviving)
-        p_threshold = sorted_p[k_max]
-        mask = p .<= p_threshold
-        t_threshold = Float64(minimum(abs.(vec(t_map)[mask])))
-    else
-        t_threshold = NaN
-    end
-
-    t_map_fdr = t_map .* mask
-
-    return t_map_fdr, mask, p, t_threshold
-end
-
-
-"""
     bonferroni_correct(t_map, df; alpha=0.05, two_tailed=true)
 
 Bonferroni correction for a voxel-wise t-map. Divides the desired alpha level
@@ -377,6 +327,53 @@ function bonferroni_correct(t_map::AbstractVector{<:Real}, df::Int;
     return t_map_bonf, mask, p, t_threshold
 end
 
+"""
+    fdr_correct(t_map, df; q=0.05, two_tailed=true)
+
+Benjamini-Hochberg FDR correction for a voxel-wise t-map.
+
+# Arguments
+- `t_map`      : vector of t-scores (one per voxel)
+- `df`         : residual degrees of freedom (n_scans - n_regressors)
+- `q`          : desired FDR level (default 0.05)
+- `two_tailed` : whether to use two-tailed p-values (default true)
+
+# Returns
+- `t_map_fdr`  : t-map with sub-threshold voxels zeroed out
+- `mask`       : BitVector — true for voxels surviving FDR correction
+- `p_vals`     : raw p-value for each voxel
+- `t_threshold`: the t-score cutoff corresponding to the FDR threshold
+                 (NaN if no voxels survive)
+
+# Example
+    t_map_fdr, mask, p_vals, t_thr = fdr_correct(t_map, n_scans - size(X, 2))
+    println("Voxels surviving FDR q<0.05: ", sum(mask))
+"""
+function fdr_correct(t_map::AbstractVector{<:Real}, df::Int;
+    q::Real=0.05, two_tailed::Bool=true)
+
+    n = length(t_map)
+    p = t_to_p(t_map, df; two_tailed)
+
+    # Benjamini-Hochberg: sort p-values, find largest k where p_(k) ≤ k/n · q
+    sorted_p = sort(p)
+    bh_line = (1:n) .* (q / n)
+    surviving = sorted_p .<= bh_line
+
+    mask = falses(n)
+    if any(surviving)
+        k_max = findlast(surviving)
+        p_threshold = sorted_p[k_max]
+        mask = p .<= p_threshold
+        t_threshold = minimum(abs.(t_map[mask]))
+    else
+        t_threshold = NaN
+    end
+
+    t_map_fdr = t_map .* mask
+
+    return t_map_fdr, mask, p, t_threshold
+end
 
 """
     plot_tmap_flat(t_map; threshold=2.0, title="t-score map")
